@@ -150,6 +150,87 @@ unsigned char* make_c_rst(const unsigned char* data){
     return rst_packet;
 }
 
+unsigned char* make_s_rst(const unsigned char* data){
+    struct eth_header *eth = (struct eth_header *)data;
+    struct ip_header *ip = (struct ip_header *)(data + sizeof(*eth));
+    uint16_t ipv4_len = (ip->ipv4_len & 0x0F)<<2;
+    struct tcp_header *tcp = (struct tcp_header *)((uint8_t *)ip + ipv4_len);
+    uint16_t tcp_len = (tcp->hlen & 0xF0)>>2;
+    char *http_data = (char *)((uint8_t *)tcp + tcp_len);
+    uint16_t http_data_len = ntohs(ip->packet_len) - ipv4_len - tcp_len;
+    uint16_t rst_packet_len = sizeof(*eth)+ipv4_len+tcp_len;
+
+    int tmp = 0;
+
+    memcpy(&ip->packet_len, &rst_packet_len, sizeof(uint16_t));
+    ip->packet_len = ntohs(ip->packet_len);
+    memset(&ip->id, 0, sizeof(uint16_t));
+    ip->ttl = 0x50;
+    memset(&tcp->acknum, 0, sizeof(uint32_t));
+    tcp->flag = 0x04;
+    memset(&tcp->wsize, 0, sizeof(uint16_t));
+
+    unsigned char* rst_packet = (unsigned char*)calloc(rst_packet_len, sizeof(uint8_t));
+    memcpy(rst_packet, eth, sizeof(*eth));
+    memcpy(rst_packet+sizeof(*eth), ip, sizeof(*ip));
+    if(ipv4_len>20){
+        memcpy(rst_packet+sizeof(*eth)+sizeof(*ip),
+               data+sizeof(*eth)+sizeof(*ip), ipv4_len-sizeof(*ip));
+    }
+    memcpy(rst_packet+sizeof(*eth)+ipv4_len, tcp, sizeof(*tcp));
+    if(tcp_len>20){
+        memcpy(rst_packet+sizeof(*eth)+ipv4_len+sizeof(*tcp),
+               data+sizeof(*eth)+ipv4_len+sizeof(*tcp), tcp_len-sizeof(*tcp));
+    }
+
+    uint16_t ip_checksum = 0;
+    uint16_t tcp_checksum = 0;
+    tmp = 0;
+
+    for(int i=0; i<ipv4_len/2; i++){
+        tmp += *(rst_packet+14+2*i)<<8;
+        tmp += *(rst_packet+14+2*i+1);
+    }
+    tmp -= ntohs(ip->checksum);
+    if(tmp>0xffff){
+        tmp = tmp - (tmp&0xFFFF0000) + ((tmp&0xFFFF0000)>>16);
+    }
+    tmp = 0xffff-tmp;
+    ip_checksum = tmp;
+    tmp = 0;
+
+    tmp += ((ntohl(ip->sip)&0xFFFF0000)>>16) + (ntohl(ip->sip)&0x0000FFFF)
+            + ((ntohl(ip->dip)&0xFFFF0000)>>16) + (ntohl(ip->dip)&0x0000FFFF)
+            + ip->pid + tcp_len;
+    if(tmp>0xffff){
+        tmp = tmp - (tmp&0xFFFF0000) + ((tmp&0xFFFF0000)>>16);
+    }
+    tcp_checksum = tmp;
+    tmp = 0;
+
+    for(int i=0; i<tcp_len/2; i++){
+        tmp += *(rst_packet+14+ipv4_len+2*i)<<8;
+        tmp += *(rst_packet+14+ipv4_len+2*i+1);
+    }
+    tmp -= ntohs(tcp->checksum);
+    if(tmp>0xffff){
+        tmp = tmp - (tmp&0xFFFF0000) + ((tmp&0xFFFF0000)>>16);
+    }
+    tmp += tcp_checksum;
+    if(tmp>0xffff){
+        tmp = tmp - (tmp&0xFFFF0000) + ((tmp&0xFFFF0000)>>16);
+    }
+    tcp_checksum = 0xffff-tmp;
+
+    ip_checksum = ntohs(ip_checksum);
+    tcp_checksum = ntohs(tcp_checksum);
+
+    memcpy(rst_packet+24, &ip_checksum, sizeof(uint16_t));
+    memcpy(rst_packet+50, &tcp_checksum, sizeof(uint16_t));
+
+    return rst_packet;
+}
+
 int main(int argc, char* argv[]){
     int line_count = 0;
     char check_line[100];
@@ -216,6 +297,7 @@ int main(int argc, char* argv[]){
         if(find_db == true){
             printf("%s  find DB\n",domain);
             unsigned char * rst_c_packet = make_c_rst(packet);
+            unsigned char * rst_s_packet = make_s_rst(packet);
 
             struct eth_header *eth = (struct eth_header *)packet;
             struct ip_header *ip = (struct ip_header *)(packet + sizeof(*eth));
@@ -226,6 +308,7 @@ int main(int argc, char* argv[]){
             int rst_packet_len = sizeof(*eth) + ipv4_len + tcp_len;
 
             pcap_sendpacket(handle, rst_c_packet, rst_packet_len);
+            pcap_sendpacket(handle, rst_s_packet, rst_packet_len);
         }
     }
 
